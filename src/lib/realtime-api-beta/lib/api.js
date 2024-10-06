@@ -4,13 +4,13 @@ import { RealtimeUtils } from './utils.js';
 export class RealtimeAPI extends RealtimeEventHandler {
   /**
    * Create a new RealtimeAPI instance
-   * @param {{url?: string, apiKey?: string, dangerouslyAllowAPIKeyInBrowser?: boolean, debug?: boolean}} [settings]
+   * @param {{url?: string, apiKey?: string, apiBase?: string, dangerouslyAllowAPIKeyInBrowser?: boolean, debug?: boolean}} [settings]
    * @returns {RealtimeAPI}
    */
-  constructor({ url, apiKey, dangerouslyAllowAPIKeyInBrowser, debug } = {}) {
+  constructor({ url, apiKey, apiBase, dangerouslyAllowAPIKeyInBrowser, debug } = {}) {
     super();
     this.defaultUrl = 'wss://api.openai.com/v1/realtime';
-    this.url = url || this.defaultUrl;
+    this.url = url || apiBase || this.defaultUrl;
     this.apiKey = apiKey || null;
     this.debug = !!debug;
     this.ws = null;

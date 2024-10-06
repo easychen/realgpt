@@ -18,6 +18,8 @@
 *.tgz
 *.bla
 
+src/*.txt
+
 # misc
 .DS_Store
 .env

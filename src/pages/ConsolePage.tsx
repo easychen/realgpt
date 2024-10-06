@@ -19,31 +19,9 @@ import { WavRenderer } from '../utils/wav_renderer';
 import { X, Edit, Zap, ArrowUp, ArrowDown } from 'react-feather';
 import { Button } from '../components/button/Button';
 import { Toggle } from '../components/toggle/Toggle';
-import { Map } from '../components/Map';
 
 import './ConsolePage.scss';
-import { isJsxOpeningLikeElement } from 'typescript';
 
-/**
- * Type for result from get_weather() function call
- */
-interface Coordinates {
-  lat: number;
-  lng: number;
-  location?: string;
-  temperature?: {
-    value: number;
-    units: string;
-  };
-  wind_speed?: {
-    value: number;
-    units: string;
-  };
-}
-
-/**
- * Type for all event logs
- */
 interface RealtimeEvent {
   time: string;
   source: 'client' | 'server';
@@ -53,17 +31,25 @@ interface RealtimeEvent {
 
 export function ConsolePage() {
   /**
-   * Ask user for API Key
-   * If we're using the local relay server, we don't need this
+   * State variables for API key, API base, and modal visibility
    */
-  const apiKey = USE_LOCAL_RELAY_SERVER_URL
-    ? ''
-    : localStorage.getItem('tmp::voice_api_key') ||
-      prompt('OpenAI API Key') ||
-      '';
-  if (apiKey !== '') {
-    localStorage.setItem('tmp::voice_api_key', apiKey);
-  }
+  const [apiKey, setApiKey] = useState('');
+  const [apiBase, setApiBase] = useState('');
+  const [showApiModal, setShowApiModal] = useState(false);
+
+  /**
+   * Check for stored API key and base on mount
+   */
+  useEffect(() => {
+    const storedApiKey = localStorage.getItem('tmp::voice_api_key') || '';
+    const storedApiBase = localStorage.getItem('tmp::voice_api_base') || '';
+    setApiKey(storedApiKey);
+    setApiBase(storedApiBase);
+
+    if (!USE_LOCAL_RELAY_SERVER_URL && (!storedApiKey || !storedApiBase)) {
+      setShowApiModal(true);
+    }
+  }, []);
 
   /**
    * Instantiate:
@@ -77,16 +63,81 @@ export function ConsolePage() {
   const wavStreamPlayerRef = useRef<WavStreamPlayer>(
     new WavStreamPlayer({ sampleRate: 24000 })
   );
-  const clientRef = useRef<RealtimeClient>(
-    new RealtimeClient(
-      USE_LOCAL_RELAY_SERVER_URL
-        ? { url: USE_LOCAL_RELAY_SERVER_URL }
-        : {
-            apiKey: apiKey,
-            dangerouslyAllowAPIKeyInBrowser: true,
+  const clientRef = useRef<RealtimeClient | null>(null);
+
+  /**
+   * Update RealtimeClient whenever API key or base changes
+   */
+  useEffect(() => {
+    if (apiKey !== '' || USE_LOCAL_RELAY_SERVER_URL) {
+      const client = new RealtimeClient(
+        USE_LOCAL_RELAY_SERVER_URL
+          ? { url: USE_LOCAL_RELAY_SERVER_URL }
+          : {
+              apiKey: apiKey,
+              apiBase: apiBase,
+              dangerouslyAllowAPIKeyInBrowser: true,
+            }
+      );
+      clientRef.current = client;
+
+      /**
+       * Core RealtimeClient and audio capture setup
+       * Set all of our instructions, events and more
+       */
+      // Get refs
+      const wavStreamPlayer = wavStreamPlayerRef.current;
+
+      // Set instructions
+      client.updateSession({ instructions: instructions });
+      // Set transcription, otherwise we don't get user transcriptions back
+      client.updateSession({ input_audio_transcription: { model: 'whisper-1' } });
+
+      // handle realtime events from client + server for event logging
+      client.on('realtime.event', (realtimeEvent: RealtimeEvent) => {
+        setRealtimeEvents((realtimeEvents) => {
+          const lastEvent = realtimeEvents[realtimeEvents.length - 1];
+          if (lastEvent?.event.type === realtimeEvent.event.type) {
+            // if we receive multiple events in a row, aggregate them for display purposes
+            lastEvent.count = (lastEvent.count || 0) + 1;
+            return realtimeEvents.slice(0, -1).concat(lastEvent);
+          } else {
+            return realtimeEvents.concat(realtimeEvent);
           }
-    )
-  );
+        });
+      });
+      client.on('error', (event: any) => console.error(event));
+      client.on('conversation.interrupted', async () => {
+        const trackSampleOffset = await wavStreamPlayer.interrupt();
+        if (trackSampleOffset?.trackId) {
+          const { trackId, offset } = trackSampleOffset;
+          await client.cancelResponse(trackId, offset);
+        }
+      });
+      client.on('conversation.updated', async ({ item, delta }: any) => {
+        const items = client.conversation.getItems();
+        if (delta?.audio) {
+          wavStreamPlayer.add16BitPCM(delta.audio, item.id);
+        }
+        if (item.status === 'completed' && item.formatted.audio?.length) {
+          const wavFile = await WavRecorder.decode(
+            item.formatted.audio,
+            24000,
+            24000
+          );
+          item.formatted.file = wavFile;
+        }
+        setItems(items);
+      });
+
+      setItems(client.conversation.getItems());
+
+      return () => {
+        client.disconnect();
+        clientRef.current = null;
+      };
+    }
+  }, [apiKey, apiBase]);
 
   /**
    * References for
@@ -104,8 +155,6 @@ export function ConsolePage() {
    * All of our variables for displaying application state
    * - items are all conversation items (dialog)
    * - realtimeEvents are event logs, which can be expanded
-   * - memoryKv is for set_memory() function
-   * - coords, marker are for get_weather() function
    */
   const [items, setItems] = useState<ItemType[]>([]);
   const [realtimeEvents, setRealtimeEvents] = useState<RealtimeEvent[]>([]);
@@ -115,12 +164,6 @@ export function ConsolePage() {
   const [isConnected, setIsConnected] = useState(false);
   const [canPushToTalk, setCanPushToTalk] = useState(true);
   const [isRecording, setIsRecording] = useState(false);
-  const [memoryKv, setMemoryKv] = useState<{ [key: string]: any }>({});
-  const [coords, setCoords] = useState<Coordinates | null>({
-    lat: 37.775593,
-    lng: -122.418137,
-  });
-  const [marker, setMarker] = useState<Coordinates | null>(null);
 
   /**
    * Utility for formatting the timing of logs
@@ -147,19 +190,15 @@ export function ConsolePage() {
    * When you click the API key
    */
   const resetAPIKey = useCallback(() => {
-    const apiKey = prompt('OpenAI API Key');
-    if (apiKey !== null) {
-      localStorage.clear();
-      localStorage.setItem('tmp::voice_api_key', apiKey);
-      window.location.reload();
-    }
+    setShowApiModal(true);
   }, []);
 
   /**
    * Connect to conversation:
-   * WavRecorder taks speech input, WavStreamPlayer output, client is API client
+   * WavRecorder takes speech input, WavStreamPlayer output, client is API client
    */
   const connectConversation = useCallback(async () => {
+    if (!clientRef.current) return;
     const client = clientRef.current;
     const wavRecorder = wavRecorderRef.current;
     const wavStreamPlayer = wavStreamPlayerRef.current;
@@ -182,14 +221,13 @@ export function ConsolePage() {
       {
         type: `input_text`,
         text: `Hello!`,
-        // text: `For testing purposes, I want you to list ten car brands. Number each item, e.g. "one (or whatever number you are one): the item name".`
       },
     ]);
 
     if (client.getTurnDetectionType() === 'server_vad') {
       await wavRecorder.record((data) => client.appendInputAudio(data.mono));
     }
-  }, []);
+  }, [apiKey, apiBase]);
 
   /**
    * Disconnect and reset conversation state
@@ -198,15 +236,9 @@ export function ConsolePage() {
     setIsConnected(false);
     setRealtimeEvents([]);
     setItems([]);
-    setMemoryKv({});
-    setCoords({
-      lat: 37.775593,
-      lng: -122.418137,
-    });
-    setMarker(null);
 
     const client = clientRef.current;
-    client.disconnect();
+    client?.disconnect();
 
     const wavRecorder = wavRecorderRef.current;
     await wavRecorder.end();
@@ -217,7 +249,7 @@ export function ConsolePage() {
 
   const deleteConversationItem = useCallback(async (id: string) => {
     const client = clientRef.current;
-    client.deleteItem(id);
+    client?.deleteItem(id);
   }, []);
 
   /**
@@ -232,9 +264,9 @@ export function ConsolePage() {
     const trackSampleOffset = await wavStreamPlayer.interrupt();
     if (trackSampleOffset?.trackId) {
       const { trackId, offset } = trackSampleOffset;
-      await client.cancelResponse(trackId, offset);
+      await client?.cancelResponse(trackId, offset);
     }
-    await wavRecorder.record((data) => client.appendInputAudio(data.mono));
+    await wavRecorder.record((data) => client?.appendInputAudio(data.mono));
   };
 
   /**
@@ -245,7 +277,7 @@ export function ConsolePage() {
     const client = clientRef.current;
     const wavRecorder = wavRecorderRef.current;
     await wavRecorder.pause();
-    client.createResponse();
+    client?.createResponse();
   };
 
   /**
@@ -257,10 +289,10 @@ export function ConsolePage() {
     if (value === 'none' && wavRecorder.getStatus() === 'recording') {
       await wavRecorder.pause();
     }
-    client.updateSession({
+    client?.updateSession({
       turn_detection: value === 'none' ? null : { type: 'server_vad' },
     });
-    if (value === 'server_vad' && client.isConnected()) {
+    if (value === 'server_vad' && client?.isConnected()) {
       await wavRecorder.record((data) => client.appendInputAudio(data.mono));
     }
     setCanPushToTalk(value === 'none');
@@ -365,147 +397,55 @@ export function ConsolePage() {
   }, []);
 
   /**
-   * Core RealtimeClient and audio capture setup
-   * Set all of our instructions, tools, events and more
-   */
-  useEffect(() => {
-    // Get refs
-    const wavStreamPlayer = wavStreamPlayerRef.current;
-    const client = clientRef.current;
-
-    // Set instructions
-    client.updateSession({ instructions: instructions });
-    // Set transcription, otherwise we don't get user transcriptions back
-    client.updateSession({ input_audio_transcription: { model: 'whisper-1' } });
-
-    // Add tools
-    client.addTool(
-      {
-        name: 'set_memory',
-        description: 'Saves important data about the user into memory.',
-        parameters: {
-          type: 'object',
-          properties: {
-            key: {
-              type: 'string',
-              description:
-                'The key of the memory value. Always use lowercase and underscores, no other characters.',
-            },
-            value: {
-              type: 'string',
-              description: 'Value can be anything represented as a string',
-            },
-          },
-          required: ['key', 'value'],
-        },
-      },
-      async ({ key, value }: { [key: string]: any }) => {
-        setMemoryKv((memoryKv) => {
-          const newKv = { ...memoryKv };
-          newKv[key] = value;
-          return newKv;
-        });
-        return { ok: true };
-      }
-    );
-    client.addTool(
-      {
-        name: 'get_weather',
-        description:
-          'Retrieves the weather for a given lat, lng coordinate pair. Specify a label for the location.',
-        parameters: {
-          type: 'object',
-          properties: {
-            lat: {
-              type: 'number',
-              description: 'Latitude',
-            },
-            lng: {
-              type: 'number',
-              description: 'Longitude',
-            },
-            location: {
-              type: 'string',
-              description: 'Name of the location',
-            },
-          },
-          required: ['lat', 'lng', 'location'],
-        },
-      },
-      async ({ lat, lng, location }: { [key: string]: any }) => {
-        setMarker({ lat, lng, location });
-        setCoords({ lat, lng, location });
-        const result = await fetch(
-          `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lng}&current=temperature_2m,wind_speed_10m`
-        );
-        const json = await result.json();
-        const temperature = {
-          value: json.current.temperature_2m as number,
-          units: json.current_units.temperature_2m as string,
-        };
-        const wind_speed = {
-          value: json.current.wind_speed_10m as number,
-          units: json.current_units.wind_speed_10m as string,
-        };
-        setMarker({ lat, lng, location, temperature, wind_speed });
-        return json;
-      }
-    );
-
-    // handle realtime events from client + server for event logging
-    client.on('realtime.event', (realtimeEvent: RealtimeEvent) => {
-      setRealtimeEvents((realtimeEvents) => {
-        const lastEvent = realtimeEvents[realtimeEvents.length - 1];
-        if (lastEvent?.event.type === realtimeEvent.event.type) {
-          // if we receive multiple events in a row, aggregate them for display purposes
-          lastEvent.count = (lastEvent.count || 0) + 1;
-          return realtimeEvents.slice(0, -1).concat(lastEvent);
-        } else {
-          return realtimeEvents.concat(realtimeEvent);
-        }
-      });
-    });
-    client.on('error', (event: any) => console.error(event));
-    client.on('conversation.interrupted', async () => {
-      const trackSampleOffset = await wavStreamPlayer.interrupt();
-      if (trackSampleOffset?.trackId) {
-        const { trackId, offset } = trackSampleOffset;
-        await client.cancelResponse(trackId, offset);
-      }
-    });
-    client.on('conversation.updated', async ({ item, delta }: any) => {
-      const items = client.conversation.getItems();
-      if (delta?.audio) {
-        wavStreamPlayer.add16BitPCM(delta.audio, item.id);
-      }
-      if (item.status === 'completed' && item.formatted.audio?.length) {
-        const wavFile = await WavRecorder.decode(
-          item.formatted.audio,
-          24000,
-          24000
-        );
-        item.formatted.file = wavFile;
-      }
-      setItems(items);
-    });
-
-    setItems(client.conversation.getItems());
-
-    return () => {
-      // cleanup; resets to defaults
-      client.reset();
-    };
-  }, []);
-
-  /**
    * Render the application
    */
   return (
     <div data-component="ConsolePage">
+      {showApiModal && (
+        <div className="modal">
+          <div className="modal-content">
+            <h2>设置API Key 和 Base URL</h2>
+            <div>
+              <label>OpenAI API Key:</label>
+              <input
+                type="text"
+                placeholder="OpenAI API Key"
+                value={apiKey}
+                onChange={(e) => setApiKey(e.target.value)}
+              />
+            </div>
+            <div>
+              <label>OpenAI API Base:</label>
+              <input
+                type="text"
+                placeholder="wss://api.openai.com/v1/realtime"
+                value={apiBase}
+                onChange={(e) => setApiBase(e.target.value)}
+              />
+            </div>
+            <div className="row">
+            <button
+              onClick={() => {
+                localStorage.setItem('tmp::voice_api_key', apiKey);
+                localStorage.setItem('tmp::voice_api_base', apiBase);
+                setShowApiModal(false);
+                window.location.reload();
+              }}
+            >
+              保存
+            </button>
+            <button
+              onClick={()=>setShowApiModal(false)}
+            >取消</button>
+            
+            </div>
+          </div>
+        </div>
+      )}
       <div className="content-top">
         <div className="content-title">
           <img src="/openai-logomark.svg" />
-          <span>realtime console</span>
+          <span>RealGPT</span>
         </div>
         <div className="content-api-key">
           {!USE_LOCAL_RELAY_SERVER_URL && (
@@ -513,7 +453,7 @@ export function ConsolePage() {
               icon={Edit}
               iconPosition="end"
               buttonStyle="flush"
-              label={`api key: ${apiKey.slice(0, 3)}...`}
+              label={`API Key: ${apiKey.slice(0, 3)}... Base: ${apiBase}`}
               onClick={() => resetAPIKey()}
             />
           )}
@@ -530,9 +470,9 @@ export function ConsolePage() {
                 <canvas ref={serverCanvasRef} />
               </div>
             </div>
-            <div className="content-block-title">events</div>
+            <div className="content-block-title">事件</div>
             <div className="content-block-body" ref={eventsScrollRef}>
-              {!realtimeEvents.length && `awaiting connection...`}
+              {!realtimeEvents.length && `Waiting for connection...`}
               {realtimeEvents.map((realtimeEvent, i) => {
                 const count = realtimeEvent.count;
                 const event = { ...realtimeEvent.event };
@@ -550,7 +490,7 @@ export function ConsolePage() {
                       <div
                         className="event-summary"
                         onClick={() => {
-                          // toggle event details
+                          // Toggle event details
                           const id = event.event_id;
                           const expanded = { ...expandedEvents };
                           if (expanded[id]) {
@@ -575,7 +515,7 @@ export function ConsolePage() {
                           )}
                           <span>
                             {event.type === 'error'
-                              ? 'error!'
+                              ? 'Error!'
                               : realtimeEvent.source}
                           </span>
                         </div>
@@ -596,9 +536,9 @@ export function ConsolePage() {
             </div>
           </div>
           <div className="content-block conversation">
-            <div className="content-block-title">conversation</div>
+            <div className="content-block-title">对话</div>
             <div className="content-block-body" data-conversation-content>
-              {!items.length && `awaiting connection...`}
+              {!items.length && `Waiting for connection...`}
               {items.map((conversationItem, i) => {
                 return (
                   <div className="conversation-item" key={conversationItem.id}>
@@ -618,11 +558,11 @@ export function ConsolePage() {
                       </div>
                     </div>
                     <div className={`speaker-content`}>
-                      {/* tool response */}
+                      {/* Tool Response */}
                       {conversationItem.type === 'function_call_output' && (
                         <div>{conversationItem.formatted.output}</div>
                       )}
-                      {/* tool call */}
+                      {/* Tool Call */}
                       {!!conversationItem.formatted.tool && (
                         <div>
                           {conversationItem.formatted.tool.name}(
@@ -634,9 +574,9 @@ export function ConsolePage() {
                           <div>
                             {conversationItem.formatted.transcript ||
                               (conversationItem.formatted.audio?.length
-                                ? '(awaiting transcript)'
+                                ? '(waiting for transcription)'
                                 : conversationItem.formatted.text ||
-                                  '(item sent)')}
+                                  '(sent item)')}
                           </div>
                         )}
                       {!conversationItem.formatted.tool &&
@@ -662,14 +602,14 @@ export function ConsolePage() {
           <div className="content-actions">
             <Toggle
               defaultValue={false}
-              labels={['manual', 'vad']}
+              labels={['手动', 'VAD']}
               values={['none', 'server_vad']}
               onChange={(_, value) => changeTurnEndType(value)}
             />
             <div className="spacer" />
             {isConnected && canPushToTalk && (
               <Button
-                label={isRecording ? 'release to send' : 'push to talk'}
+                label={isRecording ? '放开发送' : '按住说话'}
                 buttonStyle={isRecording ? 'alert' : 'regular'}
                 disabled={!isConnected || !canPushToTalk}
                 onMouseDown={startRecording}
@@ -678,7 +618,7 @@ export function ConsolePage() {
             )}
             <div className="spacer" />
             <Button
-              label={isConnected ? 'disconnect' : 'connect'}
+              label={isConnected ? '断开' : '连接'}
               iconPosition={isConnected ? 'end' : 'start'}
               icon={isConnected ? X : Zap}
               buttonStyle={isConnected ? 'regular' : 'action'}
@@ -686,40 +626,6 @@ export function ConsolePage() {
                 isConnected ? disconnectConversation : connectConversation
               }
             />
-          </div>
-        </div>
-        <div className="content-right">
-          <div className="content-block map">
-            <div className="content-block-title">get_weather()</div>
-            <div className="content-block-title bottom">
-              {marker?.location || 'not yet retrieved'}
-              {!!marker?.temperature && (
-                <>
-                  <br />
-                  🌡️ {marker.temperature.value} {marker.temperature.units}
-                </>
-              )}
-              {!!marker?.wind_speed && (
-                <>
-                  {' '}
-                  🍃 {marker.wind_speed.value} {marker.wind_speed.units}
-                </>
-              )}
-            </div>
-            <div className="content-block-body full">
-              {coords && (
-                <Map
-                  center={[coords.lat, coords.lng]}
-                  location={coords.location}
-                />
-              )}
-            </div>
-          </div>
-          <div className="content-block kv">
-            <div className="content-block-title">set_memory()</div>
-            <div className="content-block-body content-kv">
-              {JSON.stringify(memoryKv, null, 2)}
-            </div>
           </div>
         </div>
       </div>
