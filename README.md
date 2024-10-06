@@ -8,6 +8,11 @@
 
 ![](image/20241006174459.png)
 
+
+https://github.com/user-attachments/assets/f174d332-505e-46b2-8480-c01ded6a31fa
+
+
+
 ## Realtime API 代理
 
 OpenAI Realtime Console 其实自带了一个代理。
