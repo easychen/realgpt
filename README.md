@@ -8,6 +8,20 @@
 
 ![](image/20241006174459.png)
 
+## Realtime API 代理
+
+OpenAI Realtime Console 其实自带了一个代理。
+
+1. git clone repo
+2. 在repo根目录建立 `.env` 文件，写入Key:
+
+```env
+OPENAI_API_KEY=sk-...
+```
+3. 运行 npm install && npm relay 即可启动服务
+
+将地址填入 RealGPT 设置界面的 api base 即可。如 `ws://localhost:8081`
+
 
 # OpenAI Realtime Console
 

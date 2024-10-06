@@ -46,7 +46,7 @@ export function ConsolePage() {
     setApiKey(storedApiKey);
     setApiBase(storedApiBase);
 
-    if (!USE_LOCAL_RELAY_SERVER_URL && (!storedApiKey || !storedApiBase)) {
+    if (!USE_LOCAL_RELAY_SERVER_URL && (!storedApiKey)) {
       setShowApiModal(true);
     }
   }, []);
