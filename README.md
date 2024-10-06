@@ -1,3 +1,14 @@
+# RealGPT
+
+基于 OpenAI Realtime Console 修改的语音聊天应用。
+
+1. 去掉了地图和memory设置
+1. 添加了 api baseUrl 的设置
+1. 优化了移动端界面
+
+![](image/20241006174459.png)
+
+
 # OpenAI Realtime Console
 
 The OpenAI Realtime Console is intended as an inspector and interactive API reference
